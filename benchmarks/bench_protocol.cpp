@@ -31,13 +31,16 @@
 #include <frozen/string.h>
 #include "phf.hh"
 #include "hashes.hh"
+#ifndef BENCH_NO_PTHASH
 #include "pthash_wrapper.h"
+#endif
+#include "jsonifier_wrapper.h"
 #include "bench_input.h"
 
 // ============================================================================
 // Filter support: --filter hits,make_perfect_map,protocol
 //   Workloads: hits, misses, mixed
-//   Methods:   make_perfect_map, naive, unordered_map, ankerl, absl, frozen, kronuz, gperf, pthash
+//   Methods:   make_perfect_map, naive, unordered_map, ankerl, absl, frozen, kronuz, gperf, pthash, jsonifier
 //   Keysets:   protocol, stock, keyword, header, mime, letters, headers50, jsreserved, counters, fqcn
 // Omitting a category means "run all" for that category.
 // ============================================================================
@@ -61,7 +64,7 @@ struct BenchFilter {
 BenchFilter parse_filter(const std::string &arg) {
   BenchFilter f;
   static const std::set<std::string> valid_workloads = {"hits", "misses", "mixed"};
-  static const std::set<std::string> valid_methods = {"make_perfect_map", "naive", "unordered_map", "ankerl", "absl", "frozen", "kronuz", "gperf", "pthash"};
+  static const std::set<std::string> valid_methods = {"make_perfect_map", "naive", "unordered_map", "ankerl", "absl", "frozen", "kronuz", "gperf", "pthash", "jsonifier"};
   static const std::set<std::string> valid_keysets = {"protocol", "stock", "keyword", "header", "mime", "letters", "headers50", "jsreserved", "counters", "fqcn"};
 
   size_t start = 0;
@@ -290,6 +293,13 @@ void bench_workload(const std::string &label,
   }
 }
 
+#ifdef BENCH_NO_PTHASH
+struct PthashWrapper {
+  void build(const std::vector<std::string_view> &) {}
+};
+void bench_pthash(const std::string &, std::vector<std::string_view> &, size_t,
+                  const PthashWrapper &, const BenchFilter &) {}
+#else
 // Separate non-template function for pthash to avoid polluting bench_workload's codegen.
 void bench_pthash(const std::string &label,
                   std::vector<std::string_view> &input,
@@ -308,6 +318,29 @@ void bench_pthash(const std::string &label,
   };
   pretty_print(label + " pthash", num_strings,
                shuffle_bench(pthash_bench, shuffle));
+  volatile auto sum = std::accumulate(results.begin(), results.end(), 0); // prevent optimization
+}
+
+#endif
+
+// Separate non-template function for jsonifier, for the same reason as pthash.
+void bench_jsonifier(const std::string &label,
+                     std::vector<std::string_view> &input,
+                     size_t num_strings,
+                     const JsonifierWrapper &jsonifier_map,
+                     const BenchFilter &filter) {
+  if (!filter.run_method("jsonifier")) return;
+  std::vector<int> results(num_strings, 0);
+  std::mt19937_64 gen(42);
+  auto shuffle = [&]() {
+    std::shuffle(input.begin(), input.end(), gen);
+  };
+  gen.seed(42);
+  auto jsonifier_bench = [&]() {
+    jsonifier_map.bench_lookup(input, results);
+  };
+  pretty_print(label + " jsonifier::hash_map", num_strings,
+               shuffle_bench(jsonifier_bench, shuffle));
   volatile auto sum = std::accumulate(results.begin(), results.end(), 0); // prevent optimization
 }
 
@@ -340,6 +373,8 @@ void run_keyset(const std::string &name,
   PthashWrapper pthash_phf;
   pthash_phf.build(hit_keys);
 
+  JsonifierWrapper jsonifier_map(name);
+
   // Build workload vectors
   auto hits   = build_input(hit_keys, num_strings, 42);
   auto misses = build_input(miss_keys, num_strings, 42);
@@ -350,16 +385,19 @@ void run_keyset(const std::string &name,
     std::println("  --- all hits ---");
     bench_workload("hits  ", hits, num_strings, phf_map, naive_fn, uset, frozen_map, kronuz_phf, gperf_fn, filter, describe);
     bench_pthash("hits  ", hits, num_strings, pthash_phf, filter);
+    bench_jsonifier("hits  ", hits, num_strings, jsonifier_map, filter);
   }
   if (filter.run_workload("misses")) {
     std::println("  --- all misses ---");
     bench_workload("misses", misses, num_strings, phf_map, naive_fn, uset, frozen_map, kronuz_phf, gperf_fn, filter, describe);
     bench_pthash("misses", misses, num_strings, pthash_phf, filter);
+    bench_jsonifier("misses", misses, num_strings, jsonifier_map, filter);
   }
   if (filter.run_workload("mixed")) {
     std::println("  --- mixed (hits + misses pool) ---");
     bench_workload("mixed ", mixed, num_strings, phf_map, naive_fn, uset, frozen_map, kronuz_phf, gperf_fn, filter, describe);
     bench_pthash("mixed ", mixed, num_strings, pthash_phf, filter);
+    bench_jsonifier("mixed ", mixed, num_strings, jsonifier_map, filter);
   }
 }
 
@@ -1119,6 +1157,8 @@ bool verify_keyset(const std::string &name,
     ok = false;
   };
 
+  JsonifierWrapper jsonifier_map(name);
+
   // Build reference map
   std::unordered_map<std::string_view, int> ref;
   for (size_t i = 0; i < hit_keys.size(); i++)
@@ -1189,6 +1229,17 @@ bool verify_keyset(const std::string &name,
         fail(std::format("gperf: false positive for miss key '{}'", key));
     }
 
+    // jsonifier
+    auto jsonifier_result = jsonifier_map.lookup(key);
+    if (is_hit) {
+      if (!jsonifier_result)
+        fail(std::format("jsonifier: missed hit key '{}'", key));
+      else if (*jsonifier_result != ref_val)
+        fail(std::format("jsonifier: key '{}' got {} expected {}", key, *jsonifier_result, ref_val));
+    } else {
+      if (jsonifier_result)
+        fail(std::format("jsonifier: false positive for miss key '{}'", key));
+    }
 
   }
 
@@ -1218,7 +1269,7 @@ int main(int argc, char *argv[]) {
       std::println("  --help, -h         Show this help message\n");
       std::println("Filter tokens (mix and match):");
       std::println("  Workloads: hits, misses, mixed");
-      std::println("  Methods:   make_perfect_map, naive, unordered_map, ankerl, absl, frozen, kronuz, gperf, pthash");
+      std::println("  Methods:   make_perfect_map, naive, unordered_map, ankerl, absl, frozen, kronuz, gperf, pthash, jsonifier");
       std::println("  Keysets:   protocol, stock, keyword, header, mime, letters, headers50, jsreserved, counters, fqcn\n");
       std::println("Omitting a category runs all values for that category.\n");
       std::println("Examples:");

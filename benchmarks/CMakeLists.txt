@@ -61,10 +61,25 @@ target_include_directories(pthash_headers SYSTEM INTERFACE
 target_compile_features(pthash_headers INTERFACE cxx_std_17)
 target_link_libraries(pthash_headers INTERFACE Threads::Threads)
 
+FetchContent_Declare(
+    jsonifier_hash_map
+    GIT_REPOSITORY https://github.com/nihilai-collective/Jsonifier.git
+    GIT_TAG hashmap-only
+)
+FetchContent_MakeAvailable(jsonifier_hash_map)
+
 add_executable(bench_protocol
     bench_protocol.cpp
-    pthash_wrapper.cpp
+    jsonifier_wrapper.cpp
 )
+
+# pthash needs POSIX headers (dirent.h), so MSVC builds skip that method.
+if(MSVC)
+    target_compile_definitions(bench_protocol PRIVATE BENCH_NO_PTHASH)
+else()
+    target_sources(bench_protocol PRIVATE pthash_wrapper.cpp)
+    target_link_libraries(bench_protocol PRIVATE pthash_headers)
+endif()
 
 target_include_directories(bench_protocol PRIVATE
     ${constexpr_phf_SOURCE_DIR}
@@ -75,9 +90,9 @@ target_link_libraries(bench_protocol PRIVATE
     ConstexprCore::perfect_hash
     counters::counters
     unordered_dense::unordered_dense
-    pthash_headers
     absl::flat_hash_map
     frozen::frozen
+    jsonifier_hash_map::jsonifier_hash_map
 )
 
 # Ticker benchmarks (N > 255): S&P 500 + all Nasdaq-listed symbols, wide mode.
@@ -136,4 +151,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(bench_protocol PRIVATE -fconstexpr-steps=2147483647)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(bench_protocol PRIVATE -fconstexpr-ops-limit=2147483647)
+elseif(MSVC)
+    target_compile_options(bench_protocol PRIVATE /constexpr:steps2147483647)
 endif()

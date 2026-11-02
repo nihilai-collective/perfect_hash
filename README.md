@@ -457,6 +457,7 @@ Each key set is tested with three query mixes (positive-only, negative-only, and
 - **`frozen::unordered_map`** — compile-time perfect hash
 - **`kronuz::phf`** — hash-based perfect hash
 - **`pthash`** — PTHash minimal perfect hash
+- **`jsonifier::hash_map`**: compile-time hash map extracted from Jsonifier (`bench_protocol` only)
 - **Naive** — if/else chain (binary search for the 100-key ticker set)
 
 The gperf `.inc` baselines are pre-generated from the `.gperf` input files in `benchmarks/` using `gperf <file>.gperf > <file>_gperf.inc`.
